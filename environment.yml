@@ -4,7 +4,7 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - pytensor
+  - numpyro
   - pymc>=5.0.0
   - numpy<2.0.0
   - matplotlib
@@ -12,4 +12,3 @@ dependencies:
   - jupyter
   - scipy
   - pandas
-  
