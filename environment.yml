@@ -1,0 +1,14 @@
+name: pymc5_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytensor
+  - pymc>=5.0.0
+  - numpy<2.0.0
+  - matplotlib
+  - arviz
+  - jupyter
+  - scipy
+  - pandas
