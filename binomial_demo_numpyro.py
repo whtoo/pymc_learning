@@ -30,6 +30,11 @@ pytensor.config.cxx = ""
 n_cores = multiprocessing.cpu_count()
 optimal_chains = min(n_cores, 4)  # NumPyro通常使用较少的链
 
+# 设置JAX设备数量以支持并行链
+if jax.default_backend() == 'cpu':
+    # 设置CPU设备数量以支持并行链
+    numpyro.set_host_device_count(min(n_cores, 4))
+
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
@@ -66,17 +71,24 @@ def create_binomial_model_numpyro(n_trials=100, true_p=0.3, n_observations=1000,
     print(f"- 核心数 = {n_cores}")
     print(f"- JAX设备 = {jax.devices()}")
     
-    # 生成观测数据
+    # 生成观测数据，确保数值有效性
     np.random.seed(42)
     observed_data = np.random.binomial(n=n_trials, p=true_p, size=n_observations)
     
+    # 检查数据有效性
+    if np.any(observed_data < 0):
+        observed_data = np.clip(observed_data, 0, n_trials)
+    if np.any(observed_data > n_trials):
+        observed_data = np.clip(observed_data, 0, n_trials)
+    
     # NumPyro模型定义
     def binomial_model(observed=None, n_trials=n_trials):
-        # 定义先验分布 - Beta分布作为p的先验
+        # 定义先验分布 - Beta分布作为p的先验，使用更稳健的参数
         p = numpyro.sample('p', dist.Beta(2.0, 2.0))
         
-        # 定义似然函数 - 二项分布
-        numpyro.sample('y', dist.Binomial(total_count=n_trials, probs=p), obs=observed)
+        # 定义似然函数 - 二项分布，确保概率在有效范围内
+        p_constrained = jnp.clip(p, 1e-6, 1-1e-6)  # 避免边界值
+        numpyro.sample('y', dist.Binomial(total_count=n_trials, probs=p_constrained), obs=observed)
     
     # 设置随机种子
     rng_key = random.PRNGKey(42)
@@ -127,22 +139,35 @@ def create_binomial_model_pymc(n_trials=100, true_p=0.3, n_observations=1000, nu
     print(f"- 真实概率 p = {true_p}")
     print(f"- 观测样本数 = {n_observations}")
     
-    # 生成观测数据
+    # 生成观测数据，确保数值有效性
     np.random.seed(42)
     observed_data = np.random.binomial(n=n_trials, p=true_p, size=n_observations)
     
+    # 检查数据有效性
+    if np.any(observed_data < 0):
+        observed_data = np.clip(observed_data, 0, n_trials)
+    if np.any(observed_data > n_trials):
+        observed_data = np.clip(observed_data, 0, n_trials)
+    
     # PyMC5模型
     with pm.Model() as model:
-        # 定义先验分布 - Beta分布作为p的先验
+        # 定义先验分布 - Beta分布作为p的先验，避免边界值
         p = pm.Beta('p', alpha=2, beta=2)
         
         # 定义似然函数 - 二项分布
         y = pm.Binomial('y', n=n_trials, p=p, observed=observed_data)
         
-        # 执行MCMC抽样
+        # 执行MCMC抽样，增加目标接受率以提高稳定性
         with timer("PyMC5 MCMC抽样"):
-            trace = pm.sample(num_samples, tune=num_warmup, chains=optimal_chains, 
-                            target_accept=0.9, random_seed=42, progressbar=False)
+            trace = pm.sample(
+                num_samples,
+                tune=num_warmup,
+                chains=optimal_chains,
+                target_accept=0.95,  # 提高目标接受率
+                random_seed=42,
+                progressbar=False,
+                init="adapt_diag"  # 使用更稳定的初始化方法
+            )
     
     return trace, observed_data, 0  # 时间由timer记录
 
@@ -306,28 +331,34 @@ def performance_benchmark():
     num_samples = 2000
     num_warmup = 1000
     
-    # NumPyro测试
-    print("正在运行NumPyro性能测试...")
-    trace_numpyro, data_numpyro, time_numpyro = create_binomial_model_numpyro(
-        n_trials=n_trials, true_p=0.3, n_observations=n_observations,
-        num_samples=num_samples, num_warmup=num_warmup
-    )
-    
-    # PyMC5测试
-    print("正在运行PyMC5性能测试...")
-    trace_pymc, data_pymc, time_pymc = create_binomial_model_pymc(
-        n_trials=n_trials, true_p=0.3, n_observations=n_observations,
-        num_samples=num_samples, num_warmup=num_warmup
-    )
-    
-    # 性能对比
-    speedup = time_pymc / time_numpyro if time_numpyro > 0 else 1
-    print(f"\n=== 性能对比结果 ===")
-    print(f"PyMC5耗时: {time_pymc:.2f}秒")
-    print(f"NumPyro耗时: {time_numpyro:.2f}秒")
-    print(f"加速比: {speedup:.1f}x")
-    
-    return trace_numpyro, trace_pymc, data_numpyro, time_numpyro, time_pymc
+    try:
+        # NumPyro测试
+        print("正在运行NumPyro性能测试...")
+        trace_numpyro, data_numpyro, time_numpyro = create_binomial_model_numpyro(
+            n_trials=n_trials, true_p=0.3, n_observations=n_observations,
+            num_samples=num_samples, num_warmup=num_warmup
+        )
+        
+        # PyMC5测试
+        print("正在运行PyMC5性能测试...")
+        trace_pymc, data_pymc, time_pymc = create_binomial_model_pymc(
+            n_trials=n_trials, true_p=0.3, n_observations=n_observations,
+            num_samples=num_samples, num_warmup=num_warmup
+        )
+        
+        # 性能对比
+        speedup = time_pymc / time_numpyro if time_numpyro > 0 else 1
+        print(f"\n=== 性能对比结果 ===")
+        print(f"PyMC5耗时: {time_pymc:.2f}秒")
+        print(f"NumPyro耗时: {time_numpyro:.2f}秒")
+        print(f"加速比: {speedup:.1f}x")
+        
+        return trace_numpyro, trace_pymc, data_numpyro, time_numpyro, time_pymc
+        
+    except Exception as e:
+        print(f"\n❌ 性能测试过程中出现错误: {str(e)}")
+        print("请检查数据有效性和模型参数设置")
+        raise
 
 def main():
     """主函数"""
